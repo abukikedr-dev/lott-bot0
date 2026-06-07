@@ -1,0 +1,8 @@
+pyTelegramBotAPI
+python-dotenv
+google-generativeai
+pandas
+openpyxl
+requests
+flask
+gunicorn
