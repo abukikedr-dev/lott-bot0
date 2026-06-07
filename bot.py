@@ -35,6 +35,8 @@ import io
 import json
 import logging
 import os
+from flask import Flask
+from threading import Thread
 import re
 import threading
 import time
@@ -50,6 +52,16 @@ from dotenv import load_dotenv
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from telebot import apihelper, types
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Bootstrap
@@ -805,6 +817,11 @@ def handle_idle(msg: types.Message) -> None:
         msg.chat.id,
         "📸 Send a photo of your logbook page to get started, or /help for instructions.",
     )
+
+# Start the web server in a background thread
+web_thread = Thread(target=run_web_server)
+web_thread.daemon = True
+web_thread.start()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Entry point
