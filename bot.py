@@ -829,4 +829,6 @@ web_thread.start()
 
 if __name__ == "__main__":
     log.info("Lottery Logbook Bot v4.0 — ready (model: %s).", OCR_MODEL)
+    bot.remove_webhook()
+    bot.infinity_polling()
     bot.infinity_polling(timeout=30, long_polling_timeout=30)
