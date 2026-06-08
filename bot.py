@@ -415,10 +415,7 @@ def _process_batch(chat_id: int, file_ids: list[str]) -> None:
     total = len(file_ids)
 
     try:
-        progress = bot.send_message(
-            chat_id,
-            f"⚙️ Received *{total}* photo(s) — processing *1* of *{total}*…",
-        )
+        progress = bot.send_message(chat_id, f"⚙️ Received *{total}* photo(s) — processing *1* of *{total}*…")
 
         for idx, file_id in enumerate(file_ids, start=1):
             if idx > 1:
