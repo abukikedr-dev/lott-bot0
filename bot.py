@@ -258,8 +258,8 @@ def extract_tickets(image_bytes: bytes) -> dict[str, str]:
 
         # Build content with file URI reference wrapped correctly for the SDK
         image_part = {
-                "mime_type"=mime_type,
-                "file_uri"=file_uri,
+                "mime_type": mime_type,
+                "file_uri": file_uri,
         }
 
 
