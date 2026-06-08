@@ -497,12 +497,12 @@ def _process_batch(chat_id: int, file_ids: list[str]) -> None:
             sess.state = State.IDLE
 
 
-    if sess.photos:
-        bot.send_message(
-            chat_id,
-            batch_summary(sess.photos),
-            reply_markup=export_kb(),
-        )
+        if sess.photos:
+            bot.send_message(
+                chat_id,
+                batch_summary(sess.photos),
+                 reply_markup=export_kb(),
+            )
         else:
             bot.send_message(
                 chat_id,
