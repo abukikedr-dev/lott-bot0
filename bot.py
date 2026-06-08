@@ -253,13 +253,7 @@ def extract_tickets(image_bytes: bytes) -> dict[str, str]:
                 break
             log.info("Waiting for file to become ACTIVE…")
             time.sleep(1)
-
-            except Exception as e:
-                if attempt == 2:
-                    raise
-                log.warning("Upload attempt %d failed: %s — retrying", attempt + 1, e)
-                time.sleep(2 ** attempt)
-
+          
         model = genai.GenerativeModel(OCR_MODEL)
 
         # Build content with file URI reference wrapped correctly for the SDK
@@ -421,62 +415,87 @@ def _process_batch(chat_id: int, file_ids: list[str]) -> None:
     total = len(file_ids)
 
     try:
-      progress = bot.send_message(
-        chat_id,
-        f"⚙️ Received *{total}* photo(s) — processing *1* of *{total}*…",
-    )
+        progress = bot.send_message(
+            chat_id,
+            f"⚙️ Received *{total}* photo(s) — processing *1* of *{total}*…",
+        )
 
-    for idx, file_id in enumerate(file_ids, start=1):
-        if idx > 1:
+        for idx, file_id in enumerate(file_ids, start=1):
+            if idx > 1:
+                try:
+                    bot.edit_message_text(
+                        f"⚙️ Processing photo *{idx}* of *{total}*…",
+                        chat_id,
+                        progress.message_id,
+                    )
+                except Exception:
+                    pass
+
             try:
-                bot.edit_message_text(
-                    f"⚙️ Processing photo *{idx}* of *{total}*…",
+                info        = bot.get_file(file_id)
+                image_bytes = bot.download_file(info.file_path)
+                data        = extract_tickets(image_bytes)
+            except Exception as exc:
+                log.error("OCR failed chat=%d photo=%d: %s", chat_id, idx, exc)
+                err_str = str(exc)
+                if "429" in err_str or "quota" in err_str.lower():
+                    msg = (
+                        "⚠️ The AI service is temporarily busy.\n"
+                        "Please wait a minute and try again."
+                    )
+                elif "upload" in err_str.lower():
+                    msg = "❌ Could not upload photo to processing server — please retry."
+                else:
+                    msg = "❌ Could not read this photo. Try a clearer, well-lit image."
+                bot.send_message(chat_id, f"Photo {idx}: {msg}")
+                continue
+
+            if not data:
+                bot.send_message(
                     chat_id,
-                    progress.message_id,
+                    f"Photo {idx}: ❌ No ticket entries found. Try a clearer image.",
                 )
+                continue
+
+            try:
+                start = str(min((int(t) for t in data if t.isdigit()), default=0))
             except Exception:
-                pass
+                start = next(iter(data), "?")
 
+            sess.photos.append(PhotoRecord(_next_photo_id(sess), start, data))
+
+        # Tear down progress message
         try:
-            info        = bot.get_file(file_id)
-            image_bytes = bot.download_file(info.file_path)
-            data        = extract_tickets(image_bytes)
-        except Exception as exc:
-            log.error("OCR failed chat=%d photo=%d: %s", chat_id, idx, exc)
-            err_str = str(exc)
-            if "429" in err_str or "quota" in err_str.lower():
-                msg = (
-                    "⚠️ The AI service is temporarily busy.\n"
-                    "Please wait a minute and try again."
-                )
-            elif "upload" in err_str.lower():
-                msg = "❌ Could not upload photo to processing server — please retry."
-            else:
-                msg = "❌ Could not read this photo. Try a clearer, well-lit image."
-            bot.send_message(chat_id, f"Photo {idx}: {msg}")
-            continue
+            bot.delete_message(chat_id, progress.message_id)
+        except Exception:
+            pass
 
-        if not data:
+        sess.state = State.AWAITING_CONFIRM if sess.photos else State.IDLE
+
+        if sess.photos:
             bot.send_message(
                 chat_id,
-                f"Photo {idx}: ❌ No ticket entries found. Try a clearer image.",
+                batch_summary(sess.photos),
+                reply_markup=export_kb(),
             )
-            continue
+        else:
+            bot.send_message(
+                chat_id,
+                "⚠️ No data could be extracted. Please try again with clearer photos.",
+            )
 
+    except Exception as exc:
+        log.error("Unhandled crash in _process_batch chat=%d: %s", chat_id, exc, exc_info=True)
         try:
-            start = str(min((int(t) for t in data if t.isdigit()), default=0))
+            bot.send_message(chat_id, "❌ An unexpected error occurred. Your session has been reset — please try again.")
         except Exception:
-            start = next(iter(data), "?")
+            pass
 
-        sess.photos.append(PhotoRecord(_next_photo_id(sess), start, data))
+    finally:
+        # ALWAYS runs — guarantees session never stays stuck at PROCESSING
+        if sess.state == State.PROCESSING:
+            sess.state = State.IDLE
 
-    # Tear down progress message
-    try:
-        bot.delete_message(chat_id, progress.message_id)
-    except Exception:
-        pass
-
-    sess.state = State.AWAITING_CONFIRM if sess.photos else State.IDLE
 
     if sess.photos:
         bot.send_message(
