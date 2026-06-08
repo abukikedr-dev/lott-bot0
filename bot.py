@@ -86,6 +86,7 @@ GEMINI_API_KEY: str = os.environ["GEMINI_API_KEY"]   # ONE key is enough now
 PROXY_URL: Optional[str] = None
 
 genai.configure(api_key=GEMINI_API_KEY)
+bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -114,7 +115,8 @@ FILES_UPLOAD_URL = (
     "?uploadType=multipart"
 )
 
-def _upload_image(image_bytes: bytes) -> str:
+def _upload_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+
     """
     Upload image bytes to the Gemini Files API.
     Returns the file URI (e.g. "files/abc123xyz") to pass to generate_content.
@@ -131,7 +133,7 @@ def _upload_image(image_bytes: bytes) -> str:
         f"Content-Type: application/json; charset=utf-8\r\n\r\n"
         f"{metadata_part}\r\n"
         f"--{boundary}\r\n"
-        f"Content-Type: image/jpeg\r\n\r\n"
+        f"Content-Type: {mime_type}\r\n\r\n"
     ).encode() + image_bytes + f"\r\n--{boundary}--".encode()
 
     headers = {
@@ -193,10 +195,15 @@ VALIDATION:
 OUTPUT — return ONLY a valid JSON object.  No markdown.  No prose.  No code fences.
 {"tickets": [{"ticket": "1", "phone": "0916039018"}, {"ticket": "2", "phone": "Empty"}]}
 """
-
 def _parse_ocr(raw: str) -> dict[str, str]:
+    # Strip markdown fences
     raw = re.sub(r"^\s*```[a-zA-Z]*\s*", "", raw.strip())
     raw = re.sub(r"\s*```\s*$", "", raw).strip()
+    # Extract the first complete JSON object in case of trailing prose
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        raise ValueError(f"No JSON object found in model response: {raw[:200]}")
+    raw = match.group(0)
     parsed = json.loads(raw)
     result: dict[str, str] = {}
     for item in parsed.get("tickets", []):
@@ -209,6 +216,7 @@ def _parse_ocr(raw: str) -> dict[str, str]:
             phone = "Empty"
         result[ticket] = phone
     return result
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OCR entry point — upload-once + exponential back-off retry
@@ -225,10 +233,24 @@ def extract_tickets(image_bytes: bytes) -> dict[str, str]:
 
     try:
         # Upload once — retried up to 3 times on network errors
+import imghdr
+        detected  = imghdr.what(None, h=image_bytes)
+        mime_type = f"image/{detected}" if detected in ("jpeg", "png", "webp", "gif") else "image/jpeg"
+        log.info("Detected MIME type: %s", mime_type)
+
         for attempt in range(3):
             try:
-                file_uri = _upload_image(image_bytes)
+                file_uri = _upload_image(image_bytes, mime_type=mime_type)
                 break
+
+                # Wait for file to become ACTIVE (usually instant, but race can occur)
+                 for _ in range(10):
+                     file_info = genai.get_file(file_uri.split("/")[-1])
+                     if file_info.state.name == "ACTIVE":
+                         break
+                     log.info("Waiting for file to become ACTIVE…")
+                     time.sleep(1)
+
             except Exception as e:
                 if attempt == 2:
                     raise
@@ -238,12 +260,14 @@ def extract_tickets(image_bytes: bytes) -> dict[str, str]:
         model = genai.GenerativeModel(OCR_MODEL)
 
         # Build content with file URI reference wrapped correctly for the SDK
-        image_part = {
-            "file_data": {
-                "mime_type": "image/jpeg",
-                "file_uri": file_uri,
-            }
-        }
+      image_part = genai.protos.Part(
+                   file_data=genai.protos.FileData(
+                       mime_type=mime_type,
+                       file_uri=file_uri,
+                   )
+              )
+
+
 
         last_exc: Exception | None = None
         sleep_time = BACKOFF_BASE
@@ -393,7 +417,8 @@ def _process_batch(chat_id: int, file_ids: list[str]) -> None:
     sess  = get_session(chat_id)
     total = len(file_ids)
 
-    progress = bot.send_message(
+    try:
+      progress = bot.send_message(
         chat_id,
         f"⚙️ Received *{total}* photo(s) — processing *1* of *{total}*…",
     )
@@ -456,11 +481,23 @@ def _process_batch(chat_id: int, file_ids: list[str]) -> None:
             batch_summary(sess.photos),
             reply_markup=export_kb(),
         )
-    else:
-        bot.send_message(
-            chat_id,
-            "⚠️ No data could be extracted. Please try again with clearer photos.",
-        )
+        else:
+            bot.send_message(
+                chat_id,
+                "⚠️ No data could be extracted. Please try again with clearer photos.",
+            )
+
+    except Exception as exc:
+        log.error("Unhandled crash in _process_batch chat=%d: %s", chat_id, exc, exc_info=True)
+        try:
+            bot.send_message(chat_id, "❌ An unexpected error occurred. Your session has been reset — please try again.")
+        except Exception:
+            pass
+
+    finally:
+        # ALWAYS runs — guarantees session never stays stuck at PROCESSING
+        if sess.state == State.PROCESSING:
+            sess.state = State.IDLE
 
 
 def _fire_batch(chat_id: int) -> None:
@@ -606,7 +643,6 @@ def _rm_markup(chat_id: int, msg_id: int) -> None:
 # Handlers
 # ─────────────────────────────────────────────────────────────────────────────
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 
 @bot.message_handler(content_types=["photo"])
 def handle_photo(msg: types.Message) -> None:
@@ -830,5 +866,4 @@ web_thread.start()
 if __name__ == "__main__":
     log.info("Lottery Logbook Bot v4.0 — ready (model: %s).", OCR_MODEL)
     bot.remove_webhook()
-    bot.infinity_polling()
     bot.infinity_polling(timeout=30, long_polling_timeout=30)
