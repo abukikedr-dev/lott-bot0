@@ -229,7 +229,7 @@ def extract_tickets(image_bytes: bytes) -> dict[str, str]:
     3. On 429/503 use exponential back-off — never a flat 70-second sleep.
     4. Acquires the global semaphore so we honour MAX_CONCURRENT.
     """
-  file_uri: Optional[str] = None
+    file_uri: Optional[str] = None
   
     try:
         import imghdr
