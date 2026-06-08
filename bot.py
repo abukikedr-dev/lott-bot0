@@ -497,17 +497,17 @@ def _process_batch(chat_id: int, file_ids: list[str]) -> None:
             sess.state = State.IDLE
 
 
-    if sess.photos:
+        if sess.photos:
         bot.send_message(
             chat_id,
             batch_summary(sess.photos),
             reply_markup=export_kb(),
         )
-        else:
-            bot.send_message(
-                chat_id,
-                "⚠️ No data could be extracted. Please try again with clearer photos.",
-            )
+    else:
+        bot.send_message(
+            chat_id,
+            "⚠️ No data could be extracted. Please try again with clearer photos.",
+        )
 
     except Exception as exc:
         log.error("Unhandled crash in _process_batch chat=%d: %s", chat_id, exc, exc_info=True)
