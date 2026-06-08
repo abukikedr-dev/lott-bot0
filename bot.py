@@ -230,11 +230,11 @@ def extract_tickets(image_bytes: bytes) -> dict[str, str]:
     4. Acquires the global semaphore so we honour MAX_CONCURRENT.
     """
     file_uri: Optional[str] = None
-  
+    
     try:
         import imghdr
         detected  = imghdr.what(None, h=image_bytes)
-        mime_type = f"image/{detected}" if detected in ("jpeg","png","webp","gif") else "image/jpeg"
+        mime_type = f"image/{detected}" if detected in ("jpeg", "png", "webp", "gif") else "image/jpeg"
         log.info("Detected MIME type: %s", mime_type)
 
         for attempt in range(3):
@@ -247,14 +247,12 @@ def extract_tickets(image_bytes: bytes) -> dict[str, str]:
                 log.warning("Upload attempt %d failed: %s — retrying", attempt + 1, e)
                 time.sleep(2 ** attempt)
 
-        # Wait for file to become ACTIVE — OUTSIDE the loop
         for _ in range(10):
             file_info = genai.get_file(file_uri.split("/")[-1])
             if file_info.state.name == "ACTIVE":
                 break
             log.info("Waiting for file to become ACTIVE…")
             time.sleep(1)
-
 
             except Exception as e:
                 if attempt == 2:
@@ -265,12 +263,12 @@ def extract_tickets(image_bytes: bytes) -> dict[str, str]:
         model = genai.GenerativeModel(OCR_MODEL)
 
         # Build content with file URI reference wrapped correctly for the SDK
-      image_part = genai.protos.Part(
-                   file_data=genai.protos.FileData(
-                       mime_type=mime_type,
-                       file_uri=file_uri,
-                   )
-              )
+        image_part = genai.protos.Part(
+            file_data=genai.protos.FileData(
+                mime_type=mime_type,
+                file_uri=file_uri,
+            )
+        )
 
 
 
