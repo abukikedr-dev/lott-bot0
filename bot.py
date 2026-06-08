@@ -411,7 +411,7 @@ BATCH_COLLECT_DELAY = 2.5   # seconds to wait for more photos in same album
 
 def _process_batch(chat_id: int, file_ids: list[str]) -> None:
     """Process a list of photo file_ids sequentially in a background thread."""
-    sess  = get_session(chat_id)
+    sess = get_session(chat_id)
     total = len(file_ids)
 
     try:
@@ -419,97 +419,46 @@ def _process_batch(chat_id: int, file_ids: list[str]) -> None:
 
         for idx, file_id in enumerate(file_ids, start=1):
             if idx > 1:
-                try:
-                    bot.edit_message_text(
-                        f"⚙️ Processing photo *{idx}* of *{total}*…",
-                        chat_id,
-                        progress.message_id,
-                    )
-                except Exception:
-                    pass
+                try: bot.edit_message_text(f"⚙️ Processing photo *{idx}* of *{total}*…", chat_id, progress.message_id)
+                except Exception: pass
 
             try:
-                info        = bot.get_file(file_id)
+                info = bot.get_file(file_id)
                 image_bytes = bot.download_file(info.file_path)
-                data        = extract_tickets(image_bytes)
+                data = extract_tickets(image_bytes)
             except Exception as exc:
                 log.error("OCR failed chat=%d photo=%d: %s", chat_id, idx, exc)
                 err_str = str(exc)
-                if "429" in err_str or "quota" in err_str.lower():
-                    msg = (
-                        "⚠️ The AI service is temporarily busy.\n"
-                        "Please wait a minute and try again."
-                    )
-                elif "upload" in err_str.lower():
-                    msg = "❌ Could not upload photo to processing server — please retry."
-                else:
-                    msg = "❌ Could not read this photo. Try a clearer, well-lit image."
+                if "429" in err_str or "quota" in err_str.lower(): msg = "⚠️ The AI service is temporarily busy.\nPlease wait a minute and try again."
+                elif "upload" in err_str.lower(): msg = "❌ Could not upload photo to processing server — please retry."
+                else: msg = "❌ Could not read this photo. Try a clearer, well-lit image."
                 bot.send_message(chat_id, f"Photo {idx}: {msg}")
                 continue
 
             if not data:
-                bot.send_message(
-                    chat_id,
-                    f"Photo {idx}: ❌ No ticket entries found. Try a clearer image.",
-                )
+                bot.send_message(chat_id, f"Photo {idx}: ❌ No ticket entries found. Try a clearer image.")
                 continue
 
-            try:
-                start = str(min((int(t) for t in data if t.isdigit()), default=0))
-            except Exception:
-                start = next(iter(data), "?")
+            try: start = str(min((int(t) for t in data if t.isdigit()), default=0))
+            except Exception: start = next(iter(data), "?")
 
             sess.photos.append(PhotoRecord(_next_photo_id(sess), start, data))
 
-        # Tear down progress message
-        try:
-            bot.delete_message(chat_id, progress.message_id)
-        except Exception:
-            pass
+        try: bot.delete_message(chat_id, progress.message_id)
+        except Exception: pass
 
         sess.state = State.AWAITING_CONFIRM if sess.photos else State.IDLE
-
-        if sess.photos:
-            bot.send_message(
-                chat_id,
-                batch_summary(sess.photos),
-                reply_markup=export_kb(),
-            )
-        else:
-            bot.send_message(
-                chat_id,
-                "⚠️ No data could be extracted. Please try again with clearer photos.",
-            )
-
-    except Exception as exc:
-        log.error("Unhandled crash in _process_batch chat=%d: %s", chat_id, exc, exc_info=True)
-        try:
-            bot.send_message(chat_id, "❌ An unexpected error occurred. Your session has been reset — please try again.")
-        except Exception:
-            pass
-
-    finally:
-        # ALWAYS runs — guarantees session never stays stuck at PROCESSING
-        if sess.state == State.PROCESSING:
-            sess.state = State.IDLE
-
 
         if sess.photos: bot.send_message(chat_id, batch_summary(sess.photos), reply_markup=export_kb())
         else: bot.send_message(chat_id, "⚠️ No data could be extracted. Please try again with clearer photos.")
 
-
     except Exception as exc:
         log.error("Unhandled crash in _process_batch chat=%d: %s", chat_id, exc, exc_info=True)
-        try:
-            bot.send_message(chat_id, "❌ An unexpected error occurred. Your session has been reset — please try again.")
-        except Exception:
-            pass
+        try: bot.send_message(chat_id, "❌ An unexpected error occurred. Your session has been reset — please try again.")
+        except Exception: pass
 
     finally:
-        # ALWAYS runs — guarantees session never stays stuck at PROCESSING
-        if sess.state == State.PROCESSING:
-            sess.state = State.IDLE
-
+        if sess.state == State.PROCESSING: sess.state = State.IDLE
 
 def _fire_batch(chat_id: int) -> None:
     """Called by the debounce timer — grabs queued IDs and launches thread."""
