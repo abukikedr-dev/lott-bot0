@@ -229,27 +229,32 @@ def extract_tickets(image_bytes: bytes) -> dict[str, str]:
     3. On 429/503 use exponential back-off — never a flat 70-second sleep.
     4. Acquires the global semaphore so we honour MAX_CONCURRENT.
     """
-    file_uri: Optional[str] = None
-
+  file_uri: Optional[str] = None
+  
     try:
-        # Upload once — retried up to 3 times on network errors
-import imghdr
+        import imghdr
         detected  = imghdr.what(None, h=image_bytes)
-        mime_type = f"image/{detected}" if detected in ("jpeg", "png", "webp", "gif") else "image/jpeg"
+        mime_type = f"image/{detected}" if detected in ("jpeg","png","webp","gif") else "image/jpeg"
         log.info("Detected MIME type: %s", mime_type)
 
         for attempt in range(3):
             try:
                 file_uri = _upload_image(image_bytes, mime_type=mime_type)
                 break
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                log.warning("Upload attempt %d failed: %s — retrying", attempt + 1, e)
+                time.sleep(2 ** attempt)
 
-                # Wait for file to become ACTIVE (usually instant, but race can occur)
-                 for _ in range(10):
-                     file_info = genai.get_file(file_uri.split("/")[-1])
-                     if file_info.state.name == "ACTIVE":
-                         break
-                     log.info("Waiting for file to become ACTIVE…")
-                     time.sleep(1)
+        # Wait for file to become ACTIVE — OUTSIDE the loop
+        for _ in range(10):
+            file_info = genai.get_file(file_uri.split("/")[-1])
+            if file_info.state.name == "ACTIVE":
+                break
+            log.info("Waiting for file to become ACTIVE…")
+            time.sleep(1)
+
 
             except Exception as e:
                 if attempt == 2:
