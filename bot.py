@@ -277,15 +277,11 @@ def extract_tickets(image_bytes: bytes) -> dict[str, str]:
           
         model = genai.GenerativeModel(OCR_MODEL)
 
-        # Build content with file URI reference wrapped correctly for the SDK
-        image_part = genai.types.Part(
-            file_data=genai.types.FileData(
-                file_uri=file_uri,
-                mime_type=mime_type,
-            )
-        )
-
-
+        # Build content with file URI reference — the SDK accepts dicts for file references
+        image_part = {
+            "mime_type": mime_type,
+            "file_uri": file_uri,
+        }
 
         last_exc: Exception | None = None
         sleep_time = BACKOFF_BASE
