@@ -6,4 +6,4 @@ openpyxl
 requests
 flask
 gunicorn
-pip install Pillow
+Pillow
