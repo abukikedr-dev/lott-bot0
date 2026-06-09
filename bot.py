@@ -232,9 +232,30 @@ def extract_tickets(image_bytes: bytes) -> dict[str, str]:
     file_uri: Optional[str] = None
     
     try:
-        import imghdr
-        detected  = imghdr.what(None, h=image_bytes)
-        mime_type = f"image/{detected}" if detected in ("jpeg", "png", "webp", "gif") else "image/jpeg"
+        # Detect MIME type from image bytes (imghdr removed in Python 3.13+)
+        mime_type = "image/jpeg"  # default
+        try:
+            from PIL import Image
+            import io as io_module
+            img = Image.open(io_module.BytesIO(image_bytes))
+            format_map = {
+                "JPEG": "image/jpeg",
+                "PNG": "image/png",
+                "WEBP": "image/webp",
+                "GIF": "image/gif",
+            }
+            mime_type = format_map.get(img.format, "image/jpeg")
+        except (ImportError, Exception):
+            # Fallback: detect from magic bytes
+            if image_bytes.startswith(b"\x89PNG"):
+                mime_type = "image/png"
+            elif image_bytes.startswith(b"\xff\xd8\xff"):
+                mime_type = "image/jpeg"
+            elif image_bytes.startswith(b"RIFF") and b"WEBP" in image_bytes[:12]:
+                mime_type = "image/webp"
+            elif image_bytes.startswith(b"GIF8"):
+                mime_type = "image/gif"
+        
         log.info("Detected MIME type: %s", mime_type)
 
         for attempt in range(3):
