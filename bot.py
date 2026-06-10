@@ -46,7 +46,7 @@ PROXY_URL: Optional[str] = None
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 
 # ── Constants ────────────────────────────────────────────────────────────────
-OCR_MODEL       = "gemini-3.5-flash"
+OCR_MODEL       = "gemini-3.1-flash-lite"
 MAX_RETRIES     = 6
 BACKOFF_BASE    = 1.5
 BACKOFF_CAP     = 64.0
@@ -368,6 +368,23 @@ def handle_idle(msg: types.Message) -> None:
         msg.chat.id,
         "📸 Send a photo of your logbook page to get started, or /help for instructions.",
     )
+# ── Render Dummy Web Server ──────────────────────────────────────────────────
+import http.server
+import socketserver
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    Handler = http.server.SimpleHTTPRequestHandler
+    try:
+        with socketserver.TCPServer(("", port), Handler) as httpd:
+            log.info("Dummy web server running on port %s to satisfy Render.", port)
+            httpd.serve_forever()
+    except Exception as e:
+        log.error("Dummy server failed to start: %s", e)
+
+# Start the web server in a background thread
+web_thread = Thread(target=run_web_server, daemon=True)
+web_thread.start()
 
 # ── Polling Entry Point ──────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -378,3 +395,5 @@ if __name__ == "__main__":
         except Exception as e:
             log.error("Bot polling failed: %s. Restarting in 5s...", e)
             time.sleep(5)
+
+#
