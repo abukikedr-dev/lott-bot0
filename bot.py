@@ -1,6 +1,5 @@
 """
-Lottery Logbook Bot — v4.1 (Native Multi-Image Batching + Key Rotation)
-──────────────────────────────────────────────────────────────────────────────
+Lottery Logbook Bot — v4.2 (Native Batching + Exports Restored)
 """
 
 import os
@@ -10,8 +9,14 @@ import json
 import logging
 import itertools
 import threading
+import csv
+import io
 from typing import Optional, Dict, List
 from threading import Thread
+
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 import telebot
 from telebot import types
@@ -26,19 +31,16 @@ log = logging.getLogger(__name__)
 
 # ── Environment & Keys ───────────────────────────────────────────────────────
 TELEGRAM_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_TOKEN")
-
-# Parse multiple keys from env (comma-separated). Fallback to single key if needed.
 keys_env = os.environ.get("GEMINI_API_KEYS", os.environ.get("GEMINI_API_KEY", ""))
 GEMINI_KEYS = [k.strip() for k in keys_env.split(",") if k.strip()]
 
 if not GEMINI_KEYS:
-    raise ValueError("No Gemini API keys found. Please set GEMINI_API_KEYS in your environment variables.")
+    raise ValueError("No Gemini API keys found. Please set GEMINI_API_KEYS.")
 
 _key_cycle = itertools.cycle(GEMINI_KEYS)
 _KEY_LOCK = threading.Lock()
 
 def get_next_key() -> str:
-    """Safely grabs the next API key in the rotation."""
     with _KEY_LOCK:
         return next(_key_cycle)
 
@@ -124,21 +126,16 @@ def _parse_ocr(raw: str) -> dict[str, dict[str, str]]:
     result = {}
     
     for img_key, tickets_list in parsed.items():
-        if not isinstance(tickets_list, list):
-            continue
-            
+        if not isinstance(tickets_list, list): continue
         img_result = {}
         for item in tickets_list:
             if not isinstance(item, dict): continue
             ticket = str(item.get("ticket", "")).strip()
             phone  = str(item.get("phone",  "Empty")).strip()
             if not ticket: continue
-            if phone != "Empty" and not PHONE_RE.match(phone):
-                phone = "Empty"
+            if phone != "Empty" and not PHONE_RE.match(phone): phone = "Empty"
             img_result[ticket] = phone
-            
         result[img_key] = img_result
-        
     return result
 
 # ── Files API Helpers ────────────────────────────────────────────────────────
@@ -163,9 +160,7 @@ def _upload_image(image_bytes: bytes, api_key: str, mime_type: str = "image/jpeg
 
     resp = requests.post(FILES_UPLOAD_URL, headers=headers, data=body, proxies=proxies, timeout=60)
     resp.raise_for_status()
-    file_uri = resp.json()["file"]["uri"]
-    log.info("Uploaded image → %s (Using key: ...%s)", file_uri, api_key[-4:])
-    return file_uri
+    return resp.json()["file"]["uri"]
 
 def _delete_file(file_uri: str, api_key: str) -> None:
     try:
@@ -173,9 +168,8 @@ def _delete_file(file_uri: str, api_key: str) -> None:
         name = file_uri.split("/v1beta/")[-1] if "/v1beta/" in file_uri else file_uri
         url = f"https://generativelanguage.googleapis.com/v1beta/{name}"
         requests.delete(url, headers={"X-Goog-Api-Key": api_key}, proxies=proxies, timeout=10)
-        log.info("Deleted remote file %s", name)
-    except Exception as e:
-        log.debug("File delete failed (non-fatal): %s", e)
+    except Exception:
+        pass
 
 # ── Core AI Extractor ────────────────────────────────────────────────────────
 def extract_tickets(images_bytes: list[bytes]) -> dict[str, dict[str, str]]:
@@ -197,7 +191,6 @@ def extract_tickets(images_bytes: list[bytes]) -> dict[str, dict[str, str]]:
                     break
                 except Exception as e:
                     if attempt == 2: raise
-                    log.warning("Upload attempt %d failed: %s — retrying", attempt + 1, e)
                     time.sleep(2 ** attempt)
 
         with _KEY_LOCK:
@@ -210,7 +203,6 @@ def extract_tickets(images_bytes: list[bytes]) -> dict[str, dict[str, str]]:
                     time.sleep(1)
 
             model = genai.GenerativeModel(OCR_MODEL)
-
             prompt_parts = [_PROMPT]
             for idx, (file_uri, mime_type) in enumerate(uploaded_uris, start=1):
                 prompt_parts.append(f"image_{idx}:")
@@ -236,17 +228,68 @@ def extract_tickets(images_bytes: list[bytes]) -> dict[str, dict[str, str]]:
                     if "429" in err_str or "quota" in err_str.lower() or "503" in err_str:
                         m = re.search(r"retry[_ ]delay.*?(\d+\.?\d*)", err_str, re.I)
                         actual_sleep = min(float(m.group(1)) + 1.0 if m else sleep_time, BACKOFF_CAP)
-                        log.warning("Rate-limit/503 on attempt %d — sleeping %.1fs", attempt, actual_sleep)
                         time.sleep(actual_sleep)
                         sleep_time = min(sleep_time * 2, BACKOFF_CAP)
                         continue
                     raise
-
             raise RuntimeError(f"OCR failed after {MAX_RETRIES} attempts. Last: {last_exc}") from last_exc
-
     finally:
         for file_uri, _ in uploaded_uris:
             _delete_file(file_uri, current_key)
+
+# ── File Export Builders ─────────────────────────────────────────────────────
+def _tsort(t: str):
+    return int(t) if t.isdigit() else t
+
+def _merged(photos: list[PhotoRecord]) -> list[tuple[str, str]]:
+    m: dict[str, str] = {}
+    for ph in photos:
+        m.update(ph.data)
+    return sorted(m.items(), key=lambda kv: _tsort(kv[0]))
+
+def build_excel(photos: list[PhotoRecord]) -> bytes:
+    rows = _merged(photos)
+    df = pd.DataFrame([{"No.": i, "Phone Number": ("" if p == "Empty" else p)} for i, (_, p) in enumerate(rows, 1)])
+    buf = io.BytesIO()
+    df.to_excel(buf, index=False, sheet_name="Lottery Sales")
+    buf.seek(0)
+
+    wb = load_workbook(buf)
+    ws = wb.active
+    hdr_fill = PatternFill("solid", fgColor="1F4E79")
+    hdr_font = Font(bold=True, color="FFFFFF", size=11)
+    center = Alignment(horizontal="center", vertical="center")
+    thin = Side(style="thin", color="AAAAAA")
+    bdr = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for cell in ws[1]:
+        cell.fill = hdr_fill; cell.font = hdr_font
+        cell.alignment = center; cell.border = bdr
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+        for cell in row:
+            cell.alignment = center; cell.border = bdr
+
+    ws.column_dimensions["A"].width = 8
+    ws.column_dimensions["B"].width = 22
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+def build_csv(photos: list[PhotoRecord]) -> bytes:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["No.", "Phone Number"])
+    for i, (_, p) in enumerate(_merged(photos), 1):
+        writer.writerow([i, "" if p == "Empty" else p])
+    return buf.getvalue().encode("utf-8-sig")
+
+def build_txt(photos: list[PhotoRecord]) -> bytes:
+    lines = [p for _, p in _merged(photos) if p != "Empty"]
+    block = "\n\n--- comma-separated ---\n" + ", ".join(lines)
+    return ("\n".join(lines) + block).encode("utf-8")
 
 # ── Batch Processor ──────────────────────────────────────────────────────────
 def batch_summary(photos: List[PhotoRecord]) -> str:
@@ -254,11 +297,13 @@ def batch_summary(photos: List[PhotoRecord]) -> str:
     return f"📊 *Batch Summary*\nPhotos processed: {len(photos)}\nTotal tickets: {total_tickets}"
 
 def export_kb(add_more: bool = True) -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup()
+    kb = types.InlineKeyboardMarkup(row_width=1)
     if add_more:
-        kb.add(types.InlineKeyboardButton("➕ Add More Photos", callback_data="add_more"))
-    kb.add(types.InlineKeyboardButton("📥 Export CSV", callback_data="export_csv"))
-    kb.add(types.InlineKeyboardButton("❌ Cancel", callback_data="cancel"))
+        kb.add(types.InlineKeyboardButton("📷 Add More Photos", callback_data="add_more"))
+    kb.add(types.InlineKeyboardButton("📊 Export Excel (.xlsx)", callback_data="export_xlsx"))
+    kb.add(types.InlineKeyboardButton("📄 Export CSV (.csv)", callback_data="export_csv"))
+    kb.add(types.InlineKeyboardButton("📝 Export Text (.txt)", callback_data="export_txt"))
+    kb.add(types.InlineKeyboardButton("❌ Cancel & Discard", callback_data="cancel"))
     return kb
 
 def _process_batch(chat_id: int, file_ids: list[str]) -> None:
@@ -273,15 +318,14 @@ def _process_batch(chat_id: int, file_ids: list[str]) -> None:
             info = bot.get_file(file_id)
             image_bytes_list.append(bot.download_file(info.file_path))
 
-        bot.edit_message_text(f"⚙️ Running AI OCR on all *{total}* photos at once (saving quota)…", chat_id, progress.message_id)
+        bot.edit_message_text(f"⚙️ Running AI OCR on all *{total}* photos at once...", chat_id, progress.message_id)
 
         try:
             batch_data = extract_tickets(image_bytes_list)
         except Exception as exc:
             log.error("OCR failed batch for chat=%d: %s", chat_id, exc)
-            err_str = str(exc)
-            if "429" in err_str or "quota" in err_str.lower(): 
-                msg = "⚠️ The AI service is temporarily busy. Please try again."
+            if "429" in str(exc) or "quota" in str(exc).lower(): 
+                msg = "⚠️ The AI service is busy. Please try again."
             else: 
                 msg = "❌ Could not process this batch. Try clearer images."
             bot.send_message(chat_id, msg)
@@ -293,7 +337,6 @@ def _process_batch(chat_id: int, file_ids: list[str]) -> None:
                 data = list(batch_data.values())[idx - 1]
 
             if not data:
-                bot.send_message(chat_id, f"Photo {idx}: ❌ No ticket entries found.")
                 continue
 
             try: start = str(min((int(t) for t in data if t.isdigit()), default=0))
@@ -309,65 +352,94 @@ def _process_batch(chat_id: int, file_ids: list[str]) -> None:
         if sess.photos: 
             bot.send_message(chat_id, batch_summary(sess.photos), reply_markup=export_kb())
         else: 
-            bot.send_message(chat_id, "⚠️ No data could be extracted. Please try again with clearer photos.")
+            bot.send_message(chat_id, "⚠️ No data could be extracted.")
 
     except Exception as exc:
-        log.error("Unhandled crash in _process_batch chat=%d: %s", chat_id, exc, exc_info=True)
-        try: bot.send_message(chat_id, "❌ An unexpected error occurred. Your session has been reset.")
+        log.error("Crash in _process_batch: %s", exc)
+        try: bot.send_message(chat_id, "❌ An unexpected error occurred.")
         except Exception: pass
     finally:
         if sess.state == State.PROCESSING: sess.state = State.IDLE
 
 # ── Handlers ─────────────────────────────────────────────────────────────────
+@bot.callback_query_handler(func=lambda c: True)
+def handle_callback(call: types.CallbackQuery) -> None:
+    chat_id = call.message.chat.id
+    sess = get_session(chat_id)
+    bot.answer_callback_query(call.id)
+    action = call.data
+
+    if action == "add_more":
+        if sess.state != State.AWAITING_CONFIRM: return
+        sess.state = State.IDLE
+        try: bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+        except Exception: pass
+        bot.send_message(chat_id, "📷 Ready — send your next photo(s).")
+        return
+
+    if action in ("export_xlsx", "export_csv", "export_txt"):
+        if not sess.photos or sess.state != State.AWAITING_CONFIRM:
+            bot.send_message(chat_id, "⚠️ No data to export.")
+            return
+        building = bot.send_message(chat_id, "⏳ Building your file…")
+        try:
+            if action == "export_xlsx":
+                raw = build_excel(sess.photos)
+                bot.send_document(chat_id, io.BytesIO(raw), visible_file_name="lottery_tickets.xlsx", caption="📊 Excel export ready.")
+            elif action == "export_csv":
+                raw = build_csv(sess.photos)
+                bot.send_document(chat_id, io.BytesIO(raw), visible_file_name="lottery_tickets.csv", caption="📄 CSV export ready.")
+            else:
+                raw = build_txt(sess.photos)
+                bot.send_document(chat_id, io.BytesIO(raw), visible_file_name="lottery_tickets.txt", caption="📝 Text export ready.")
+            
+            try: bot.delete_message(chat_id, building.message_id)
+            except Exception: pass
+            try: bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+            except Exception: pass
+            sess.reset()
+        except Exception as exc:
+            log.error("Export failed: %s", exc)
+            bot.edit_message_text("❌ Export failed.", chat_id, building.message_id)
+        return
+
+    if action == "cancel":
+        sess.reset()
+        try: bot.edit_message_text("❌ Batch cancelled.", chat_id, call.message.message_id)
+        except Exception: bot.send_message(chat_id, "❌ Batch cancelled.")
+
 @bot.message_handler(content_types=['photo'])
 def handle_photos(msg: types.Message):
     sess = get_session(msg.chat.id)
     if sess.state == State.PROCESSING:
-        bot.reply_to(msg, "⏳ Please wait, I am currently processing a batch...")
+        bot.reply_to(msg, "⏳ Please wait, processing a batch...")
         return
         
     sess.state = State.PROCESSING
-    # If using media groups, Telegram sends photos individually. You might need 
-    # external media group handlers depending on your bot's specific architecture.
-    # For a single photo test:
     file_id = msg.photo[-1].file_id
-    
     Thread(target=_process_batch, args=(msg.chat.id, [file_id]), daemon=True).start()
 
 @bot.message_handler(commands=["start", "help"])
 def handle_start(msg: types.Message) -> None:
-    bot.send_message(
-        msg.chat.id,
-        "👋 Welcome! Send me photos of your logbook to extract tickets.\n\n"
-        "📊 Export to *Excel*, *CSV*, or *plain text* when ready.",
-    )
+    bot.send_message(msg.chat.id, "👋 Send me photos of your logbook to extract tickets.")
 
 @bot.message_handler(commands=["cancel"])
 def handle_cancel(msg: types.Message) -> None:
     get_session(msg.chat.id).reset()
-    bot.send_message(msg.chat.id, "❌ Session cancelled — all data cleared.")
+    bot.send_message(msg.chat.id, "❌ Session cancelled.")
 
 @bot.message_handler(commands=["status"])
 def handle_status(msg: types.Message) -> None:
     sess = get_session(msg.chat.id)
     if not sess.photos:
-        bot.send_message(msg.chat.id, "ℹ️ No active batch. Send a photo to get started.")
+        bot.send_message(msg.chat.id, "ℹ️ No active batch.")
         return
-    bot.send_message(
-        msg.chat.id,
-        batch_summary(sess.photos),
-        reply_markup=export_kb(add_more=sess.state == State.AWAITING_CONFIRM),
-    )
+    bot.send_message(msg.chat.id, batch_summary(sess.photos), reply_markup=export_kb(add_more=sess.state == State.AWAITING_CONFIRM))
 
-@bot.message_handler(
-    func=lambda m: get_session(m.chat.id).state == State.IDLE,
-    content_types=["text"],
-)
+@bot.message_handler(func=lambda m: get_session(m.chat.id).state == State.IDLE, content_types=["text"])
 def handle_idle(msg: types.Message) -> None:
-    bot.send_message(
-        msg.chat.id,
-        "📸 Send a photo of your logbook page to get started, or /help for instructions.",
-    )
+    bot.send_message(msg.chat.id, "📸 Send a photo of your logbook page to get started.")
+
 # ── Render Dummy Web Server ──────────────────────────────────────────────────
 import http.server
 import socketserver
@@ -377,23 +449,19 @@ def run_web_server():
     Handler = http.server.SimpleHTTPRequestHandler
     try:
         with socketserver.TCPServer(("", port), Handler) as httpd:
-            log.info("Dummy web server running on port %s to satisfy Render.", port)
             httpd.serve_forever()
-    except Exception as e:
-        log.error("Dummy server failed to start: %s", e)
+    except Exception: pass
 
-# Start the web server in a background thread
 web_thread = Thread(target=run_web_server, daemon=True)
 web_thread.start()
 
 # ── Polling Entry Point ──────────────────────────────────────────────────────
 if __name__ == "__main__":
-    log.info("Starting Lottery Logbook Bot (Multi-Image Batching & Key Rotation)...")
+    log.info("Starting Lottery Logbook Bot...")
+    bot.remove_webhook() # Clears conflicting webhooks
     while True:
         try:
             bot.polling(none_stop=True, timeout=60)
         except Exception as e:
             log.error("Bot polling failed: %s. Restarting in 5s...", e)
             time.sleep(5)
-
-#
