@@ -92,7 +92,7 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-OCR_MODEL       = "gemini-1.5-flash"    # change to gemini-2.5-flash if preferred
+OCR_MODEL       = "gemini-3.5-flash"    # change to gemini-2.5-flash if preferred
 MAX_RETRIES     = 6                     # exponential back-off retries
 BACKOFF_BASE    = 1.5                   # seconds — doubles each retry
 BACKOFF_CAP     = 64.0                  # seconds — maximum sleep between retries
